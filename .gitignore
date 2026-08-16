@@ -18,3 +18,7 @@ packages/
 
 # Logs
 *.log
+
+# Generated recognition output
+sonuc.png
+recog/sonuc.png

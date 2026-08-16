@@ -7,24 +7,16 @@ class Program
     {
         Console.WriteLine("Yüz tanıma başlatılıyor...");
 
-        // ============================================================
-        // 1. Yüz tespit modeli
-        // ============================================================
+        string? cascadePath = FindFile("haarcascade_frontalface_default.xml");
 
-        string cascadePath = "haarcascade_frontalface_default.xml";
-
-        if (!File.Exists(cascadePath))
+        if (cascadePath is null)
         {
             Console.WriteLine("HATA: Haar Cascade dosyası bulunamadı!");
-            Console.WriteLine(cascadePath);
+            Console.WriteLine("haarcascade_frontalface_default.xml");
             return;
         }
 
         using var faceDetector = new CascadeClassifier(cascadePath);
-
-        // ============================================================
-        // 2. Zeynep'in eğitim fotoğrafları
-        // ============================================================
 
         string[] trainingFiles =
         {
@@ -41,13 +33,14 @@ class Program
 
         foreach (string file in trainingFiles)
         {
-            if (!File.Exists(file))
+            string? filePath = FindFile(file, Path.ChangeExtension(file, ".png"));
+            if (filePath is null)
             {
                 Console.WriteLine($"HATA: {file} bulunamadı!");
                 return;
             }
 
-            using Mat image = Cv2.ImRead(file);
+            using Mat image = Cv2.ImRead(filePath);
 
             if (image.Empty())
             {
@@ -55,27 +48,10 @@ class Program
                 return;
             }
 
-            // Gri tona çevir
             using Mat gray = new Mat();
+            Cv2.CvtColor(image, gray, ColorConversionCodes.BGR2GRAY);
 
-            Cv2.CvtColor(
-                image,
-                gray,
-                ColorConversionCodes.BGR2GRAY
-            );
-
-            // Kontrastı biraz iyileştir
-            Cv2.EqualizeHist(gray, gray);
-
-            // Yüzleri bul
-            Rect[] faces = faceDetector.DetectMultiScale(
-                gray,
-                scaleFactor: 1.1,
-                minNeighbors: 5,
-                flags: HaarDetectionTypes.ScaleImage,
-                minSize: new Size(80, 80)
-            );
-
+            Rect[] faces = DetectFaces(faceDetector, gray);
             if (faces.Length == 0)
             {
                 Console.WriteLine(
@@ -85,34 +61,17 @@ class Program
                 continue;
             }
 
-            // İlk yüzü eğitim için kullan
-            Rect face = faces[0];
+            Rect face = faces
+                .OrderByDescending(f => f.Width * f.Height)
+                .First();
 
-            using Mat faceImage = new Mat(
-                gray,
-                face
-            );
-
-            // LBPH için yüzleri aynı boyuta getiriyoruz
-            Mat resizedFace = new Mat();
-
-            Cv2.Resize(
-                faceImage,
-                resizedFace,
-                new Size(200, 200)
-            );
-
-            trainingFaces.Add(resizedFace);
+            trainingFaces.Add(PrepareFace(gray, face));
             labels.Add(ZEYNEP_LABEL);
 
             Console.WriteLine(
                 $"{file} -> Yüz bulundu."
             );
         }
-
-        // ============================================================
-        // 3. Eğitim verisi kontrolü
-        // ============================================================
 
         if (trainingFaces.Count == 0)
         {
@@ -128,17 +87,13 @@ class Program
             $"{trainingFaces.Count} adet Zeynep yüzü ile eğitim yapılıyor..."
         );
 
-        // ============================================================
-        // 4. LBPH yüz tanıyıcı oluştur
-        // ============================================================
-
         using var recognizer =
             LBPHFaceRecognizer.Create(
                 radius: 1,
                 neighbors: 8,
                 gridX: 8,
                 gridY: 8,
-                threshold: 80
+                threshold: double.MaxValue
             );
 
         recognizer.Train(
@@ -148,16 +103,12 @@ class Program
 
         Console.WriteLine("Eğitim tamamlandı.");
 
-        // ============================================================
-        // 5. Farklı.png dosyasını aç
-        // ============================================================
+        string? inputFile = FindFile("farklı.png");
 
-        string inputFile = "farklı.png";
-
-        if (!File.Exists(inputFile))
+        if (inputFile is null)
         {
             Console.WriteLine(
-                $"HATA: {inputFile} bulunamadı!"
+                "HATA: farklı.png bulunamadı!"
             );
 
             return;
@@ -175,64 +126,31 @@ class Program
             return;
         }
 
-        // ============================================================
-        // 6. Farklı.png -> Gri görüntü
-        // ============================================================
-
         using Mat resultGray = new Mat();
-
         Cv2.CvtColor(
             resultImage,
             resultGray,
             ColorConversionCodes.BGR2GRAY
         );
 
-        Cv2.EqualizeHist(
-            resultGray,
-            resultGray
-        );
-
-        // ============================================================
-        // 7. Farklı.png içerisindeki yüzleri bul
-        // ============================================================
-
-        Rect[] detectedFaces =
-            faceDetector.DetectMultiScale(
-                resultGray,
-                scaleFactor: 1.1,
-                minNeighbors: 5,
-                flags: HaarDetectionTypes.ScaleImage,
-                minSize: new Size(80, 80)
-            );
+        Rect[] detectedFaces = DetectFaces(faceDetector, resultGray);
 
         Console.WriteLine();
         Console.WriteLine(
             $"farklı.png içerisinde {detectedFaces.Length} yüz bulundu."
         );
 
-        // ============================================================
-        // 8. Bulunan her yüzü Zeynep ile karşılaştır
-        // ============================================================
+        const double maxZeynepDistance = 70;
+        const double minGapToOthers = 10;
 
-        int zeynepCount = 0;
+        var scoredFaces = new List<(Rect Face, double Confidence)>();
 
         foreach (Rect face in detectedFaces)
         {
-            using Mat faceImage =
-                new Mat(resultGray, face);
+            using Mat prepared = PrepareFace(resultGray, face);
 
-            using Mat resizedFace =
-                new Mat();
-
-            Cv2.Resize(
-                faceImage,
-                resizedFace,
-                new Size(200, 200)
-            );
-
-            // LBPH tahmini
             recognizer.Predict(
-                resizedFace,
+                prepared,
                 out int predictedLabel,
                 out double confidence
             );
@@ -242,109 +160,37 @@ class Program
                 $"Confidence: {confidence:F2}"
             );
 
-            // ========================================================
-            // LBPH'de confidence DÜŞÜK oldukça eşleşme daha iyidir.
-            //
-            // threshold = 80 olarak belirledik.
-            // ========================================================
-
-            if (
-                predictedLabel == ZEYNEP_LABEL &&
-                confidence < 80
-            )
-            {
-                zeynepCount++;
-
-                // ====================================================
-                // 9. Yüzün etrafına kare çiz
-                // ====================================================
-
-                Cv2.Rectangle(
-                    resultImage,
-                    face,
-                    Scalar.Red,
-                    3
-                );
-
-                // ====================================================
-                // 10. "Zeynep" yazısını kare üzerine koy
-                // ====================================================
-
-                string text = "Zeynep";
-
-                int baseline;
-
-                Size textSize =
-                    Cv2.GetTextSize(
-                        text,
-                        HersheyFonts.HersheySimplex,
-                        0.8,
-                        2,
-                        out baseline
-                    );
-
-                // Yazının karenin üstünde kalması için
-                // uygun konum hesaplanıyor.
-
-                int textX = face.X;
-
-                int textY =
-                    face.Y - 10;
-
-                // Eğer yüz görüntünün üst kısmındaysa
-                // yazıyı karenin içine koy.
-                if (textY - textSize.Height < 0)
-                {
-                    textY =
-                        face.Y + textSize.Height + 10;
-                }
-
-                // Yazının arka planı
-                Cv2.Rectangle(
-                    resultImage,
-                    new Point(
-                        textX,
-                        textY - textSize.Height - 5
-                    ),
-                    new Point(
-                        textX + textSize.Width + 5,
-                        textY + 5
-                    ),
-                    Scalar.Red,
-                    -1
-                );
-
-                // Yazı
-                Cv2.PutText(
-                    resultImage,
-                    text,
-                    new Point(
-                        textX + 2,
-                        textY
-                    ),
-                    HersheyFonts.HersheySimplex,
-                    0.8,
-                    Scalar.White,
-                    2
-                );
-
-                Console.WriteLine(
-                    $"Zeynep bulundu! " +
-                    $"Confidence: {confidence:F2}"
-                );
-            }
-            else
-            {
-                Console.WriteLine(
-                    $"Bu yüz Zeynep olarak tanınmadı. " +
-                    $"Confidence: {confidence:F2}"
-                );
-            }
+            scoredFaces.Add((face, confidence));
         }
 
-        // ============================================================
-        // 11. Sonucu kaydet
-        // ============================================================
+        var ranked = scoredFaces
+            .OrderBy(item => item.Confidence)
+            .ToList();
+
+        Rect? zeynepFace = null;
+
+        if (ranked.Count > 0)
+        {
+            double best = ranked[0].Confidence;
+            double second = ranked.Count > 1
+                ? ranked[1].Confidence
+                : double.MaxValue;
+
+            if (best < maxZeynepDistance && (second - best) >= minGapToOthers)
+                zeynepFace = ranked[0].Face;
+        }
+
+        int zeynepCount = 0;
+
+        if (zeynepFace.HasValue)
+        {
+            var match = ranked[0];
+            zeynepCount = 1;
+            DrawLabel(resultImage, match.Face, "Zeynep", Scalar.Lime);
+            Console.WriteLine(
+                $"Zeynep bulundu! Confidence: {match.Confidence:F2}"
+            );
+        }
 
         string outputFile = "sonuc.png";
 
@@ -352,10 +198,6 @@ class Program
             outputFile,
             resultImage
         );
-
-        // ============================================================
-        // 12. Sonuç
-        // ============================================================
 
         Console.WriteLine();
         Console.WriteLine("==============================");
@@ -379,5 +221,107 @@ class Program
         );
 
         Console.WriteLine("==============================");
+    }
+
+    static Rect[] DetectFaces(CascadeClassifier detector, Mat gray)
+    {
+        using Mat equalized = new Mat();
+        Cv2.EqualizeHist(gray, equalized);
+
+        return detector.DetectMultiScale(
+            equalized,
+            scaleFactor: 1.1,
+            minNeighbors: 5,
+            flags: HaarDetectionTypes.ScaleImage,
+            minSize: new Size(80, 80)
+        );
+    }
+
+    static Mat PrepareFace(Mat gray, Rect face)
+    {
+        Rect padded = ExpandRect(face, gray.Size(), 0.12);
+        using Mat crop = new Mat(gray, padded);
+        using Mat equalized = new Mat();
+        Cv2.EqualizeHist(crop, equalized);
+
+        Mat resized = new Mat();
+        Cv2.Resize(equalized, resized, new Size(200, 200));
+        return resized;
+    }
+
+    static Rect ExpandRect(Rect rect, Size imageSize, double pad)
+    {
+        int dx = (int)(rect.Width * pad);
+        int dy = (int)(rect.Height * pad);
+        int x = Math.Max(0, rect.X - dx);
+        int y = Math.Max(0, rect.Y - dy);
+        int width = Math.Min(imageSize.Width - x, rect.Width + (2 * dx));
+        int height = Math.Min(imageSize.Height - y, rect.Height + (2 * dy));
+        return new Rect(x, y, width, height);
+    }
+
+    static void DrawLabel(Mat image, Rect face, string text, Scalar color)
+    {
+        Cv2.Rectangle(image, face, color, 3);
+
+        Size textSize = Cv2.GetTextSize(
+            text,
+            HersheyFonts.HersheySimplex,
+            0.8,
+            2,
+            out _
+        );
+
+        int textX = face.X;
+        int textY = face.Y - 10;
+        if (textY - textSize.Height < 0)
+            textY = face.Y + textSize.Height + 10;
+
+        Cv2.Rectangle(
+            image,
+            new Point(textX, textY - textSize.Height - 5),
+            new Point(textX + textSize.Width + 5, textY + 5),
+            color,
+            -1
+        );
+
+        Cv2.PutText(
+            image,
+            text,
+            new Point(textX + 2, textY),
+            HersheyFonts.HersheySimplex,
+            0.8,
+            Scalar.White,
+            2
+        );
+    }
+
+    static string? FindFile(params string[] names)
+    {
+        string[] dirs =
+        {
+            Directory.GetCurrentDirectory(),
+            Path.Combine(Directory.GetCurrentDirectory(), "data"),
+            AppContext.BaseDirectory,
+            Path.Combine(AppContext.BaseDirectory, "data"),
+        };
+
+        foreach (string name in names)
+        {
+            if (string.IsNullOrWhiteSpace(name))
+                continue;
+
+            if (Path.IsPathRooted(name) && File.Exists(name))
+                return name;
+
+            foreach (string dir in dirs)
+            {
+                string path = Path.Combine(dir, name);
+                if (File.Exists(path))
+                    return path;
+            }
+        }
+
+        return null;
     }
 }
